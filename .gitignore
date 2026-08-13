@@ -4,9 +4,16 @@ install/
 log/
 
 # Python
+.venv/
+venv/
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Local environment / secrets
+.env
+.env.*
+!env.example
 
 # Editor/OS cruft
 .vscode/
