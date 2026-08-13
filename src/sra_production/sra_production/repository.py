@@ -5,6 +5,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from sra_core import TransitionNotAllowed
+
+from .lifecycle import (
+    CarrierEvent,
+    ProductLifecycleEvent,
+    make_carrier_machine,
+    make_product_machine,
+)
 from .state_model import get_state_info, infer_top_cover, is_valid_transition
 
 
@@ -19,7 +27,6 @@ class ProductionRepository:
         self.connection = connection
 
     def ensure_carrier(self, carrier_id: int) -> None:
-        """Ensure that a physical Festo carrier exists in the backend."""
         carrier_id = self._validate_carrier_id(carrier_id)
         try:
             with self.connection.cursor() as cur:
@@ -37,7 +44,6 @@ class ProductionRepository:
         fuse_configuration: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
-        """Record a NOK camera attempt without allocating a permanent part."""
         carrier_id = self._validate_carrier_id(carrier_id)
         if bottom_cover is not None:
             self._validate_bottom_cover(bottom_cover)
@@ -50,13 +56,8 @@ class ProductionRepository:
                 cur.execute(
                     """
                     INSERT INTO inspection_events (
-                        carrier_id,
-                        result,
-                        bottom_cover,
-                        fuse_configuration,
-                        details
-                    )
-                    VALUES (%s, FALSE, %s, %s, %s::jsonb)
+                        carrier_id, result, bottom_cover, fuse_configuration, details
+                    ) VALUES (%s, FALSE, %s, %s, %s::jsonb)
                     """,
                     (
                         carrier_id,
@@ -78,11 +79,6 @@ class ProductionRepository:
         fuse_configuration: str,
         details: dict[str, Any] | None = None,
     ) -> int:
-        """Create the permanent digital twin after a successful camera result.
-
-        State Code 100 is the first confirmed production state. Duplicate State
-        100 observations for the same active carrier are idempotent.
-        """
         carrier_id = self._validate_carrier_id(carrier_id)
         self._validate_bottom_cover(bottom_cover)
         self._validate_fuse_configuration(fuse_configuration)
@@ -101,6 +97,19 @@ class ProductionRepository:
                         )
                     self.connection.commit()
                     return part_number
+
+                cur.execute(
+                    "SELECT status FROM carriers WHERE carrier_id = %s FOR UPDATE",
+                    (carrier_id,),
+                )
+                carrier_row = cur.fetchone()
+                if carrier_row is None:
+                    raise ProductionTrackingError(f"Unknown carrier: {carrier_id}")
+                carrier_machine = make_carrier_machine(carrier_row[0])
+                try:
+                    carrier_machine.handle(CarrierEvent.ASSIGN_PRODUCT)
+                except TransitionNotAllowed as exc:
+                    raise ProductionTrackingError(str(exc)) from exc
 
                 cur.execute(
                     """
@@ -124,12 +133,8 @@ class ProductionRepository:
                 cur.execute(
                     """
                     INSERT INTO inspection_events (
-                        carrier_id,
-                        part_number,
-                        result,
-                        bottom_cover,
-                        fuse_configuration,
-                        details
+                        carrier_id, part_number, result, bottom_cover,
+                        fuse_configuration, details
                     )
                     VALUES (%s, %s, TRUE, %s, %s, %s::jsonb)
                     """,
@@ -141,7 +146,6 @@ class ProductionRepository:
                         json.dumps(details or {}),
                     ),
                 )
-
                 self._insert_process_event(
                     cur,
                     part_number=part_number,
@@ -152,7 +156,17 @@ class ProductionRepository:
                     new_state_code=100,
                     details=details,
                 )
-                self._touch_carrier(cur, carrier_id, 100)
+                cur.execute(
+                    """
+                    UPDATE carriers
+                    SET current_state_code = 100,
+                        status = %s,
+                        last_seen_at = NOW(),
+                        updated_at = NOW()
+                    WHERE carrier_id = %s
+                    """,
+                    (carrier_machine.state.value, carrier_id),
+                )
 
             self.connection.commit()
             return part_number
@@ -168,7 +182,6 @@ class ProductionRepository:
         station: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> int:
-        """Apply a confirmed Festo State Code to the carrier's active product."""
         carrier_id = self._validate_carrier_id(carrier_id)
         state_code = int(state_code)
         get_state_info(state_code)
@@ -178,9 +191,7 @@ class ProductionRepository:
                 "State Code 100 must be created through accept_camera_inspection()"
             )
         if state_code == 0:
-            raise ProductionTrackingError(
-                "Carrier reset is not a product-state transition"
-            )
+            raise ProductionTrackingError("Carrier reset is not a product-state transition")
 
         try:
             with self.connection.cursor() as cur:
@@ -238,7 +249,6 @@ class ProductionRepository:
         *,
         details: dict[str, Any] | None = None,
     ) -> int:
-        """Complete Dispatch and transfer identity from Carrier ID to Part Number."""
         carrier_id = self._validate_carrier_id(carrier_id)
         if state_code not in (701, 702):
             raise ProductionTrackingError(
@@ -267,9 +277,7 @@ class ProductionRepository:
                     cur.execute(
                         """
                         UPDATE parts
-                        SET state_code = %s,
-                            top_cover = %s,
-                            updated_at = NOW()
+                        SET state_code = %s, top_cover = %s, updated_at = NOW()
                         WHERE part_number = %s
                         """,
                         (state_code, infer_top_cover(state_code), part_number),
@@ -286,16 +294,33 @@ class ProductionRepository:
                     )
 
                 cur.execute(
+                    "SELECT status FROM parts WHERE part_number = %s FOR UPDATE",
+                    (part_number,),
+                )
+                product_machine = make_product_machine(cur.fetchone()[0])
+                cur.execute(
+                    "SELECT status FROM carriers WHERE carrier_id = %s FOR UPDATE",
+                    (carrier_id,),
+                )
+                carrier_machine = make_carrier_machine(cur.fetchone()[0])
+
+                try:
+                    product_machine.handle(ProductLifecycleEvent.DISPATCH_COMPLETE)
+                    carrier_machine.handle(CarrierEvent.DISPATCH_HANDOFF)
+                except TransitionNotAllowed as exc:
+                    raise ProductionTrackingError(str(exc)) from exc
+
+                cur.execute(
                     """
                     UPDATE parts
                     SET carrier_link_active = FALSE,
                         dispatch_position = %s,
-                        status = 'WAITING_PICKUP',
+                        status = %s,
                         dispatched_at = NOW(),
                         updated_at = NOW()
                     WHERE part_number = %s
                     """,
-                    (dispatch_position, part_number),
+                    (dispatch_position, product_machine.state.value, part_number),
                 )
                 self._insert_process_event(
                     cur,
@@ -311,12 +336,12 @@ class ProductionRepository:
                     """
                     UPDATE carriers
                     SET current_state_code = %s,
-                        status = 'AVAILABLE',
+                        status = %s,
                         last_seen_at = NOW(),
                         updated_at = NOW()
                     WHERE carrier_id = %s
                     """,
-                    (state_code, carrier_id),
+                    (state_code, carrier_machine.state.value, carrier_id),
                 )
 
             self.connection.commit()
@@ -357,7 +382,6 @@ class ProductionRepository:
             """
             UPDATE carriers
             SET current_state_code = %s,
-                status = 'IN_USE',
                 last_seen_at = NOW(),
                 updated_at = NOW()
             WHERE carrier_id = %s
@@ -380,15 +404,9 @@ class ProductionRepository:
         cur.execute(
             """
             INSERT INTO part_process_events (
-                part_number,
-                carrier_id,
-                station,
-                event_type,
-                old_state_code,
-                new_state_code,
-                details
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                part_number, carrier_id, station, event_type,
+                old_state_code, new_state_code, details
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
             """,
             (
                 part_number,
