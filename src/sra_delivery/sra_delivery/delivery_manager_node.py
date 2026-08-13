@@ -12,6 +12,7 @@ from std_msgs.msg import String
 
 from .database import connect_database
 from .repository import DeliveryRepository, DeliveryReservationError
+from .service import prepare_delivery
 
 
 SAFE_BEFORE_PICK_STEPS = {None, "PREPARE", "MOVE_TO_PICKUP", "PICK"}
@@ -46,48 +47,26 @@ class DeliveryManagerNode(Node):
             if not isinstance(request, dict):
                 raise ValueError("Delivery request must be a JSON object")
 
-            bottom_cover = self._required_choice(
-                request, "bottom_cover", {"blue", "red", "black"}
-            )
-            top_cover = self._required_choice(request, "top_cover", {"blue", "red"})
-            fuse_configuration = self._required_choice(
-                request, "fuse_configuration", {"none", "upper", "lower", "both"}
-            )
-            quantity = self._required_int(request, "quantity")
-            destination = str(request.get("destination", "")).strip()
-            if not destination:
-                raise ValueError("Missing required field: destination")
-
-            reserved = self._repository.create_request(
-                bottom_cover=bottom_cover,
-                top_cover=top_cover,
-                fuse_configuration=fuse_configuration,
-                quantity=quantity,
-                destination=destination,
+            prepared = prepare_delivery(
+                self._repository,
+                bottom_cover=request.get("bottom_cover", ""),
+                top_cover=request.get("top_cover", ""),
+                fuse_configuration=request.get("fuse_configuration", ""),
+                quantity=request.get("quantity", 0),
+                destination=request.get("destination", ""),
             )
 
-            jobs = []
-            for item in reserved["items"]:
-                job = {
-                    "job_id": item["job_id"],
-                    "job_type": "DELIVERY",
-                    "request_id": reserved["request_id"],
-                    "part_number": item["part_number"],
-                    "source": "STORAGE",
-                    "slot_id": item["slot_id"],
-                    "destination": destination,
-                }
+            for job in prepared["jobs"]:
                 self._publish_job(job)
-                jobs.append(job)
 
             self._publish_delivery_event(
                 {
                     "type": "delivery_queued",
-                    "request_id": reserved["request_id"],
-                    "quantity": quantity,
-                    "destination": destination,
-                    "parts": [job["part_number"] for job in jobs],
-                    "jobs": [job["job_id"] for job in jobs],
+                    "request_id": prepared["request_id"],
+                    "quantity": prepared["quantity"],
+                    "destination": prepared["destination"],
+                    "parts": prepared["parts"],
+                    "jobs": [job["job_id"] for job in prepared["jobs"]],
                 }
             )
             self._clear_delivery_alert()
@@ -216,25 +195,6 @@ class DeliveryManagerNode(Node):
             ensure_ascii=False,
         )
         self.alert_pub.publish(msg)
-
-    @staticmethod
-    def _required_int(payload: dict[str, Any], key: str) -> int:
-        if key not in payload:
-            raise ValueError(f"Missing required field: {key}")
-        try:
-            value = int(payload[key])
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid integer field {key}: {payload[key]}") from exc
-        if value <= 0:
-            raise ValueError(f"Field {key} must be greater than zero")
-        return value
-
-    @staticmethod
-    def _required_choice(payload: dict[str, Any], key: str, allowed: set[str]) -> str:
-        value = str(payload.get(key, "")).strip().lower()
-        if value not in allowed:
-            raise ValueError(f"Invalid {key}: {value}")
-        return value
 
     def destroy_node(self):
         if self._connection is not None:
