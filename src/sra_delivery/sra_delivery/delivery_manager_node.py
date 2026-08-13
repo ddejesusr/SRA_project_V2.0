@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from typing import Any
 
 import rclpy
@@ -27,12 +26,7 @@ class DeliveryManagerNode(Node):
         self._connection = connect_database()
         self._repository = DeliveryRepository(self._connection)
 
-        self.create_subscription(
-            String,
-            "/sra/delivery/request",
-            self._request_callback,
-            20,
-        )
+        self.create_subscription(String, "/sra/delivery/request", self._request_callback, 20)
         self.create_subscription(
             String,
             "/sra/robot/jobs/status",
@@ -40,21 +34,9 @@ class DeliveryManagerNode(Node):
             50,
         )
 
-        self.job_pub = self.create_publisher(
-            String,
-            "/sra/robot/jobs/request",
-            50,
-        )
-        self.delivery_pub = self.create_publisher(
-            String,
-            "/sra/delivery/events",
-            50,
-        )
-        self.alert_pub = self.create_publisher(
-            String,
-            "/sra/alerts/events",
-            20,
-        )
+        self.job_pub = self.create_publisher(String, "/sra/robot/jobs/request", 50)
+        self.delivery_pub = self.create_publisher(String, "/sra/delivery/events", 50)
+        self.alert_pub = self.create_publisher(String, "/sra/alerts/events", 20)
 
         self.get_logger().info("V2 delivery manager ready on physical inventory.")
 
@@ -86,14 +68,8 @@ class DeliveryManagerNode(Node):
 
             jobs = []
             for item in reserved["items"]:
-                job_id = str(uuid.uuid4())
-                self._repository.assign_job(
-                    reserved["request_id"],
-                    item["part_number"],
-                    job_id,
-                )
                 job = {
-                    "job_id": job_id,
+                    "job_id": item["job_id"],
                     "job_type": "DELIVERY",
                     "request_id": reserved["request_id"],
                     "part_number": item["part_number"],
@@ -151,11 +127,7 @@ class DeliveryManagerNode(Node):
             if state == "COMPLETED":
                 result = self._repository.complete_delivery(job_id)
                 self._publish_delivery_event(
-                    {
-                        "type": "part_delivered",
-                        "job_id": job_id,
-                        **result,
-                    }
+                    {"type": "part_delivered", "job_id": job_id, **result}
                 )
                 self._clear_delivery_alert()
                 return
@@ -175,11 +147,7 @@ class DeliveryManagerNode(Node):
                 if step in SAFE_BEFORE_PICK_STEPS:
                     result = self._repository.release_before_pick(job_id)
                     self._publish_delivery_event(
-                        {
-                            "type": "delivery_cancelled_safe",
-                            "job_id": job_id,
-                            **result,
-                        }
+                        {"type": "delivery_cancelled_safe", "job_id": job_id, **result}
                     )
                 else:
                     result = self._repository.mark_position_unknown(job_id)
