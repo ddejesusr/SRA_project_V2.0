@@ -6,6 +6,7 @@ It expects the new PostgreSQL database (default: sra_v2_db) to be initialized.
 Usage:
   ros2 launch sra_bringup sra_v2_sim.launch.py
   ros2 launch sra_bringup sra_v2_sim.launch.py voice:=false
+  ros2 launch sra_bringup sra_v2_sim.launch.py production_sim:=false
 """
 
 from launch import LaunchDescription
@@ -21,6 +22,11 @@ def generate_launch_description():
         default_value="true",
         description="Set to false to disable microphone input",
     )
+    production_sim_arg = DeclareLaunchArgument(
+        "production_sim",
+        default_value="true",
+        description="Set to false when normalized production events come from OPC UA",
+    )
 
     production_tracker = Node(
         package="sra_production",
@@ -28,6 +34,15 @@ def generate_launch_description():
         name="sra_production_tracker",
         output="screen",
         emulate_tty=True,
+    )
+
+    production_sim = Node(
+        package="sra_production",
+        executable="production_sim",
+        name="sra_production_sim",
+        output="screen",
+        emulate_tty=True,
+        condition=IfCondition(LaunchConfiguration("production_sim")),
     )
 
     storage_manager = Node(
@@ -95,12 +110,14 @@ def generate_launch_description():
     return LaunchDescription(
         [
             voice_arg,
+            production_sim_arg,
             LogInfo(msg="===="),
             LogInfo(msg="  SRA V2 simulation stack starting..."),
             LogInfo(msg="  Database: SRA_V2_DB_NAME (default sra_v2_db)"),
             LogInfo(msg="===="),
             tts,
             production_tracker,
+            production_sim,
             storage_manager,
             delivery_manager,
             robot_scheduler,
