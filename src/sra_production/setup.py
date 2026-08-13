@@ -19,6 +19,7 @@ setup(
     entry_points={
         'console_scripts': [
             'production_tracker = sra_production.production_tracker_node:main',
+            'production_sim = sra_production.production_sim_node:main',
         ],
     },
 )
