@@ -16,9 +16,16 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from sra_delivery.repository import DeliveryRepository
+
 from .presenters import format_skill_response
 from .repositories import InventoryRepository
-from .skills import GetStockSkill, GetTotalStockSkill, SkillRegistry
+from .skills import (
+    GetStockSkill,
+    GetTotalStockSkill,
+    RequestDeliverySkill,
+    SkillRegistry,
+)
 
 
 DB_CONFIG = {
@@ -42,12 +49,26 @@ class AgentNode(Node):
 
         self._connection = psycopg2.connect(**DB_CONFIG)
         self._connection.autocommit = False
+
+        self.tts_pub = self.create_publisher(String, "/sra/tts/speak", 10)
+        self.result_pub = self.create_publisher(String, "/sra/agent/result", 10)
+        self.robot_job_pub = self.create_publisher(
+            String,
+            "/sra/robot/jobs/request",
+            50,
+        )
+
         inventory_repository = InventoryRepository(self._connection)
+        delivery_repository = DeliveryRepository(self._connection)
 
         self.registry = SkillRegistry(
             [
                 GetTotalStockSkill(inventory_repository),
                 GetStockSkill(inventory_repository),
+                RequestDeliverySkill(
+                    delivery_repository,
+                    self._publish_robot_job,
+                ),
             ]
         )
 
@@ -57,8 +78,6 @@ class AgentNode(Node):
             self._command_callback,
             10,
         )
-        self.tts_pub = self.create_publisher(String, "/sra/tts/speak", 10)
-        self.result_pub = self.create_publisher(String, "/sra/agent/result", 10)
 
         self.get_logger().info(
             "Skill-based agent ready with %d registered skills."
@@ -99,6 +118,9 @@ You are the routing component of an industrial robot assistant.
 Select exactly one available backend skill and extract only its arguments.
 Never answer the operator's question yourself. Never write SQL. Never invent
 backend results. If no skill applies, set skill to null.
+
+Canonical backend values are English even when the operator speaks Spanish.
+For fuse-box arguments, use only enum values declared by the selected skill.
 
 AVAILABLE SKILLS:
 {definitions}
@@ -141,6 +163,11 @@ Return only JSON with this schema:
         except Exception as exc:
             self.get_logger().error(f"Skill selection failed: {exc}")
             return {"skill": None, "arguments": {}, "confidence": 0.0}
+
+    def _publish_robot_job(self, payload: dict[str, Any]) -> None:
+        msg = String()
+        msg.data = json.dumps(payload)
+        self.robot_job_pub.publish(msg)
 
     def _publish_response(self, text: str) -> None:
         msg = String()
