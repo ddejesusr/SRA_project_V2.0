@@ -71,7 +71,7 @@ def generate_launch_description():
 
     robot_sim = Node(
         package="sra_robot_sim",
-        executable="robot_sim",
+        executable="robot_executor_sim",
         name="sra_robot_sim",
         output="screen",
         emulate_tty=True,
