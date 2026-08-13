@@ -16,5 +16,9 @@ setup(
     maintainer_email='master@todo.todo',
     description='SRA production tracking and Festo carrier digital-twin logic',
     license='MIT',
-    entry_points={'console_scripts': []},
+    entry_points={
+        'console_scripts': [
+            'production_tracker = sra_production.production_tracker_node:main',
+        ],
+    },
 )
