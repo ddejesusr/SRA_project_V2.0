@@ -38,7 +38,6 @@ DB_CONFIG = {
 
 OLLAMA_URL = os.getenv("SRA_OLLAMA_URL", "http://localhost:11434/api/chat")
 OLLAMA_MODEL = os.getenv("SRA_OLLAMA_MODEL", "llama3.1:8b-instruct-q4_K_M")
-CONFIDENCE_THRESHOLD = float(os.getenv("SRA_CONFIDENCE_THRESHOLD", "0.75"))
 
 
 class AgentNode(Node):
@@ -87,20 +86,19 @@ class AgentNode(Node):
     def _command_callback(self, msg: String) -> None:
         request = self._select_skill(msg.data.strip())
         skill_name = request.get("skill")
-        confidence = request.get("confidence", 0.0)
+        arguments = request.get("arguments", {})
 
-        if not skill_name or confidence < CONFIDENCE_THRESHOLD:
+        if not skill_name:
             response = (
                 "No entendí con suficiente claridad la solicitud. Por favor, repítala."
             )
             self._publish_result(
                 {
-                    "skill": skill_name,
-                    "arguments": request.get("arguments", {}),
-                    "confidence": confidence,
+                    "skill": None,
+                    "arguments": arguments,
                     "result": {
                         "success": False,
-                        "error": "LOW_CONFIDENCE_ROUTING",
+                        "error": "NO_MATCHING_SKILL",
                     },
                     "response": response,
                 }
@@ -108,14 +106,13 @@ class AgentNode(Node):
             self._publish_response(response)
             return
 
-        result = self.registry.execute(skill_name, request.get("arguments", {}))
+        result = self.registry.execute(skill_name, arguments)
         response = format_skill_response(skill_name, result)
 
         self._publish_result(
             {
                 "skill": skill_name,
-                "arguments": request.get("arguments", {}),
-                "confidence": confidence,
+                "arguments": arguments,
                 "result": result,
                 "response": response,
             }
@@ -144,8 +141,7 @@ AVAILABLE SKILLS:
 Return only JSON with this schema:
 {{
   "skill": "skill.name" or null,
-  "arguments": {{}},
-  "confidence": 0.0
+  "arguments": {{}}
 }}
 """.strip()
 
@@ -169,16 +165,12 @@ Return only JSON with this schema:
             if start < 0 or end < start:
                 raise ValueError("No JSON object returned by language model")
             parsed = json.loads(content[start:end + 1])
-            confidence = parsed.get("confidence", 0.0)
-            if not isinstance(confidence, (int, float)):
-                confidence = 0.0
-            parsed["confidence"] = max(0.0, min(1.0, float(confidence)))
             if not isinstance(parsed.get("arguments", {}), dict):
                 parsed["arguments"] = {}
             return parsed
         except Exception as exc:
             self.get_logger().error(f"Skill selection failed: {exc}")
-            return {"skill": None, "arguments": {}, "confidence": 0.0}
+            return {"skill": None, "arguments": {}}
 
     def _publish_robot_job(self, payload: dict[str, Any]) -> None:
         msg = String()
