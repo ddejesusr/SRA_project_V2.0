@@ -16,6 +16,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from .presenters import format_skill_response
 from .repositories import InventoryRepository
 from .skills import GetStockSkill, GetTotalStockSkill, SkillRegistry
 
@@ -76,7 +77,7 @@ class AgentNode(Node):
             return
 
         result = self.registry.execute(skill_name, request.get("arguments", {}))
-        response = self._format_spanish_response(skill_name, result)
+        response = format_skill_response(skill_name, result)
 
         payload = {
             "skill": skill_name,
@@ -140,27 +141,6 @@ Return only JSON with this schema:
         except Exception as exc:
             self.get_logger().error(f"Skill selection failed: {exc}")
             return {"skill": None, "arguments": {}, "confidence": 0.0}
-
-    @staticmethod
-    def _format_spanish_response(skill_name: str, result: dict[str, Any]) -> str:
-        """Format current user-facing responses without asking the LLM for facts."""
-        if result.get("success"):
-            if skill_name == "inventory.get_total_stock":
-                return f"Actualmente hay {result['available']} cajas de fusibles disponibles."
-            if skill_name == "inventory.get_stock":
-                return (
-                    f"Actualmente hay {result['available']} cajas disponibles "
-                    f"de la configuración {result['config_code']}."
-                )
-
-        error = result.get("error")
-        if error == "CONFIGURATION_NOT_FOUND":
-            return "No existe esa configuración de caja de fusibles en el sistema."
-        if error == "INVALID_ARGUMENTS":
-            return "La solicitud no contiene todos los datos necesarios."
-        if error == "UNKNOWN_SKILL":
-            return "Esa capacidad todavía no está disponible en el sistema."
-        return "No fue posible completar la consulta solicitada."
 
     def _publish_response(self, text: str) -> None:
         msg = String()
