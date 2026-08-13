@@ -21,18 +21,13 @@ class ProductionRepository:
     def ensure_carrier(self, carrier_id: int) -> None:
         """Ensure that a physical Festo carrier exists in the backend."""
         carrier_id = self._validate_carrier_id(carrier_id)
-        with self.connection.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO carriers (carrier_id, last_seen_at, updated_at)
-                VALUES (%s, NOW(), NOW())
-                ON CONFLICT (carrier_id) DO UPDATE SET
-                    last_seen_at = NOW(),
-                    updated_at = NOW()
-                """,
-                (carrier_id,),
-            )
-        self.connection.commit()
+        try:
+            with self.connection.cursor() as cur:
+                self._upsert_carrier(cur, carrier_id)
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def record_failed_inspection(
         self,
@@ -44,6 +39,11 @@ class ProductionRepository:
     ) -> None:
         """Record a NOK camera attempt without allocating a permanent part."""
         carrier_id = self._validate_carrier_id(carrier_id)
+        if bottom_cover is not None:
+            self._validate_bottom_cover(bottom_cover)
+        if fuse_configuration is not None:
+            self._validate_fuse_configuration(fuse_configuration)
+
         try:
             with self.connection.cursor() as cur:
                 self._upsert_carrier(cur, carrier_id)
@@ -80,9 +80,8 @@ class ProductionRepository:
     ) -> int:
         """Create the permanent digital twin after a successful camera result.
 
-        State Code 100 is the first confirmed production state. A carrier may
-        have only one active product link, so duplicate successful camera events
-        are idempotent only when they refer to the same product already at 100.
+        State Code 100 is the first confirmed production state. Duplicate State
+        100 observations for the same active carrier are idempotent.
         """
         carrier_id = self._validate_carrier_id(carrier_id)
         self._validate_bottom_cover(bottom_cover)
@@ -94,12 +93,14 @@ class ProductionRepository:
                 active = self._get_active_part(cur, carrier_id, for_update=True)
 
                 if active is not None:
-                    if active[1] == 100:
-                        return active[0]
-                    raise ProductionTrackingError(
-                        f"Carrier {carrier_id} already has active part "
-                        f"{active[0]} at State Code {active[1]}"
-                    )
+                    part_number, state_code = active
+                    if state_code != 100:
+                        raise ProductionTrackingError(
+                            f"Carrier {carrier_id} already has active part "
+                            f"{part_number} at State Code {state_code}"
+                        )
+                    self.connection.commit()
+                    return part_number
 
                 cur.execute(
                     """
@@ -151,18 +152,7 @@ class ProductionRepository:
                     new_state_code=100,
                     details=details,
                 )
-
-                cur.execute(
-                    """
-                    UPDATE carriers
-                    SET current_state_code = 100,
-                        status = 'IN_USE',
-                        last_seen_at = NOW(),
-                        updated_at = NOW()
-                    WHERE carrier_id = %s
-                    """,
-                    (carrier_id,),
-                )
+                self._touch_carrier(cur, carrier_id, 100)
 
             self.connection.commit()
             return part_number
@@ -212,7 +202,6 @@ class ProductionRepository:
                         f"{current_state} -> {state_code}"
                     )
 
-                top_cover = infer_top_cover(state_code)
                 cur.execute(
                     """
                     UPDATE parts
@@ -221,9 +210,8 @@ class ProductionRepository:
                         updated_at = NOW()
                     WHERE part_number = %s
                     """,
-                    (state_code, top_cover, part_number),
+                    (state_code, infer_top_cover(state_code), part_number),
                 )
-
                 self._touch_carrier(cur, carrier_id, state_code)
                 self._insert_process_event(
                     cur,
@@ -251,6 +239,7 @@ class ProductionRepository:
         details: dict[str, Any] | None = None,
     ) -> int:
         """Complete Dispatch and transfer identity from Carrier ID to Part Number."""
+        carrier_id = self._validate_carrier_id(carrier_id)
         if state_code not in (701, 702):
             raise ProductionTrackingError(
                 f"Dispatch handoff requires State Code 701 or 702, got {state_code}"
@@ -259,8 +248,6 @@ class ProductionRepository:
             raise ProductionTrackingError(
                 f"Dispatch position must be 1 or 2, got {dispatch_position}"
             )
-
-        carrier_id = self._validate_carrier_id(carrier_id)
 
         try:
             with self.connection.cursor() as cur:
@@ -277,7 +264,6 @@ class ProductionRepository:
                             f"Invalid dispatch transition for carrier {carrier_id}: "
                             f"{current_state} -> {state_code}"
                         )
-
                     cur.execute(
                         """
                         UPDATE parts
@@ -311,7 +297,6 @@ class ProductionRepository:
                     """,
                     (dispatch_position, part_number),
                 )
-
                 self._insert_process_event(
                     cur,
                     part_number=part_number,
@@ -320,12 +305,8 @@ class ProductionRepository:
                     event_type="CARRIER_HANDOFF",
                     old_state_code=state_code,
                     new_state_code=state_code,
-                    details={
-                        **(details or {}),
-                        "dispatch_position": dispatch_position,
-                    },
+                    details={**(details or {}), "dispatch_position": dispatch_position},
                 )
-
                 cur.execute(
                     """
                     UPDATE carriers
