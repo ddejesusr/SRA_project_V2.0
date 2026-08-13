@@ -24,28 +24,11 @@ class ProductionTrackerNode(Node):
         self._connection = connect_database()
         self._repository = ProductionRepository(self._connection)
 
-        self.create_subscription(
-            String,
-            "/sra/production/input",
-            self._event_callback,
-            20,
-        )
+        self.create_subscription(String, "/sra/production/input", self._event_callback, 20)
 
-        self.production_pub = self.create_publisher(
-            String,
-            "/sra/production/events",
-            20,
-        )
-        self.alert_pub = self.create_publisher(
-            String,
-            "/sra/alerts/events",
-            20,
-        )
-        self.tts_pub = self.create_publisher(
-            String,
-            "/sra/tts/speak",
-            10,
-        )
+        self.production_pub = self.create_publisher(String, "/sra/production/events", 20)
+        self.alert_pub = self.create_publisher(String, "/sra/alerts/events", 20)
+        self.tts_alert_pub = self.create_publisher(String, "/sra/tts/alert", 10)
 
         self.get_logger().info("Production tracker ready on SRA V2 database.")
 
@@ -92,10 +75,7 @@ class ProductionTrackerNode(Node):
                 details=details,
             )
             self._publish_production_event(
-                {
-                    "type": "inspection_failed",
-                    "carrier_id": carrier_id,
-                }
+                {"type": "inspection_failed", "carrier_id": carrier_id}
             )
             self._publish_inspection_alert(carrier_id)
             return
@@ -190,15 +170,20 @@ class ProductionTrackerNode(Node):
             f"La inspección de la caja transportada por el portador {carrier_id} "
             "no fue satisfactoria. Revise la estación de cámara."
         )
-        alert = {
-            "key": "camera_inspection",
-            "level": "warning",
-            "active": True,
-            "message": operator_message,
-            "carrier_id": carrier_id,
-        }
-        self._publish_alert(alert)
-        self._publish_tts(operator_message)
+        self._publish_alert(
+            {
+                "key": "camera_inspection",
+                "level": "warning",
+                "active": True,
+                "message": operator_message,
+                "carrier_id": carrier_id,
+            }
+        )
+        self._publish_tts_alert(
+            key="camera_inspection",
+            active=True,
+            text=operator_message,
+        )
 
     def _clear_inspection_alert(self) -> None:
         self._publish_alert(
@@ -208,6 +193,11 @@ class ProductionTrackerNode(Node):
                 "active": False,
                 "message": "",
             }
+        )
+        self._publish_tts_alert(
+            key="camera_inspection",
+            active=False,
+            text="",
         )
 
     def _publish_tracking_alert(
@@ -234,10 +224,13 @@ class ProductionTrackerNode(Node):
         msg.data = json.dumps(payload, ensure_ascii=False)
         self.alert_pub.publish(msg)
 
-    def _publish_tts(self, text: str) -> None:
+    def _publish_tts_alert(self, *, key: str, active: bool, text: str) -> None:
         msg = String()
-        msg.data = text
-        self.tts_pub.publish(msg)
+        msg.data = json.dumps(
+            {"key": key, "active": active, "text": text},
+            ensure_ascii=False,
+        )
+        self.tts_alert_pub.publish(msg)
 
     @staticmethod
     def _required_int(event: dict[str, Any], key: str) -> int:
