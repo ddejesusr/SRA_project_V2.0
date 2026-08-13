@@ -2,12 +2,19 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>sra_bringup</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <version>0.1.0</version>
+  <description>SRA legacy and V2 system launch configurations</description>
   <maintainer email="master@todo.todo">master</maintainer>
-  <license>TODO: License declaration</license>
+  <license>MIT</license>
 
   <depend>rclpy</depend>
+  <exec_depend>sra_agent</exec_depend>
+  <exec_depend>sra_production</exec_depend>
+  <exec_depend>sra_storage</exec_depend>
+  <exec_depend>sra_robot_scheduler</exec_depend>
+  <exec_depend>sra_robot_sim</exec_depend>
+  <exec_depend>sra_tts</exec_depend>
+  <exec_depend>sra_voice_input</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
