@@ -9,6 +9,7 @@
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
+  <depend>sra_core</depend>
 
   <test_depend>python3-pytest</test_depend>
 
