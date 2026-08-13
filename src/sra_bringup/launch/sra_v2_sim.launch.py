@@ -38,6 +38,14 @@ def generate_launch_description():
         emulate_tty=True,
     )
 
+    delivery_manager = Node(
+        package="sra_delivery",
+        executable="delivery_manager",
+        name="sra_delivery_manager",
+        output="screen",
+        emulate_tty=True,
+    )
+
     robot_scheduler = Node(
         package="sra_robot_scheduler",
         executable="robot_scheduler",
@@ -94,6 +102,7 @@ def generate_launch_description():
             tts,
             production_tracker,
             storage_manager,
+            delivery_manager,
             robot_scheduler,
             robot_sim,
             agent,
