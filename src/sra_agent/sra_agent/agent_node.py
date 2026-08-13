@@ -90,24 +90,36 @@ class AgentNode(Node):
         confidence = request.get("confidence", 0.0)
 
         if not skill_name or confidence < CONFIDENCE_THRESHOLD:
-            self._publish_response(
+            response = (
                 "No entendí con suficiente claridad la solicitud. Por favor, repítala."
             )
+            self._publish_result(
+                {
+                    "skill": skill_name,
+                    "arguments": request.get("arguments", {}),
+                    "confidence": confidence,
+                    "result": {
+                        "success": False,
+                        "error": "LOW_CONFIDENCE_ROUTING",
+                    },
+                    "response": response,
+                }
+            )
+            self._publish_response(response)
             return
 
         result = self.registry.execute(skill_name, request.get("arguments", {}))
         response = format_skill_response(skill_name, result)
 
-        payload = {
-            "skill": skill_name,
-            "arguments": request.get("arguments", {}),
-            "confidence": confidence,
-            "result": result,
-            "response": response,
-        }
-        out = String()
-        out.data = json.dumps(payload, ensure_ascii=False)
-        self.result_pub.publish(out)
+        self._publish_result(
+            {
+                "skill": skill_name,
+                "arguments": request.get("arguments", {}),
+                "confidence": confidence,
+                "result": result,
+                "response": response,
+            }
+        )
         self._publish_response(response)
 
     def _select_skill(self, text: str) -> dict[str, Any]:
@@ -121,6 +133,10 @@ backend results. If no skill applies, set skill to null.
 
 Canonical backend values are English even when the operator speaks Spanish.
 For fuse-box arguments, use only enum values declared by the selected skill.
+Use inventory.get_total_stock when the operator asks for overall/total available
+stock and does not specify a fuse-box configuration.
+Use inventory.get_stock only when an exact bottom cover, top cover, and fuse
+configuration are requested.
 
 AVAILABLE SKILLS:
 {definitions}
@@ -168,6 +184,11 @@ Return only JSON with this schema:
         msg = String()
         msg.data = json.dumps(payload)
         self.robot_job_pub.publish(msg)
+
+    def _publish_result(self, payload: dict[str, Any]) -> None:
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False)
+        self.result_pub.publish(msg)
 
     def _publish_response(self, text: str) -> None:
         msg = String()
