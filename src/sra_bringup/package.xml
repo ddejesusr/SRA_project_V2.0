@@ -11,6 +11,7 @@
   <exec_depend>sra_agent</exec_depend>
   <exec_depend>sra_production</exec_depend>
   <exec_depend>sra_storage</exec_depend>
+  <exec_depend>sra_delivery</exec_depend>
   <exec_depend>sra_robot_scheduler</exec_depend>
   <exec_depend>sra_robot_sim</exec_depend>
   <exec_depend>sra_tts</exec_depend>
