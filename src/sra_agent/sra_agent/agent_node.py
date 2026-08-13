@@ -22,11 +22,11 @@ from .skills import GetStockSkill, GetTotalStockSkill, SkillRegistry
 
 
 DB_CONFIG = {
-    "host": os.getenv("SRA_DB_HOST", "localhost"),
-    "dbname": os.getenv("SRA_DB_NAME", "sra_db"),
-    "user": os.getenv("SRA_DB_USER", "sra_user"),
-    "password": os.getenv("SRA_DB_PASSWORD", ""),
-    "port": int(os.getenv("SRA_DB_PORT", "5432")),
+    "host": os.getenv("SRA_V2_DB_HOST", "localhost"),
+    "dbname": os.getenv("SRA_V2_DB_NAME", "sra_v2_db"),
+    "user": os.getenv("SRA_V2_DB_USER", "sra_user"),
+    "password": os.getenv("SRA_V2_DB_PASSWORD", ""),
+    "port": int(os.getenv("SRA_V2_DB_PORT", "5432")),
 }
 
 OLLAMA_URL = os.getenv("SRA_OLLAMA_URL", "http://localhost:11434/api/chat")
