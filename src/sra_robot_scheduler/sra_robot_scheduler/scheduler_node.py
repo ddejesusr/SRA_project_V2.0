@@ -12,13 +12,16 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from .lifecycle import RobotJobEvent, RobotJobState, make_robot_job_machine
 
-TERMINAL_STATUSES = {
-    "COMPLETED",
-    "FAILED",
-    "FAILED_SAFE_AT_SOURCE",
-    "POSITION_UNKNOWN",
-    "CANCELLED",
+
+EXECUTOR_EVENT_BY_STATUS = {
+    "RUNNING": RobotJobEvent.START,
+    "COMPLETED": RobotJobEvent.COMPLETE,
+    "FAILED": RobotJobEvent.FAIL,
+    "FAILED_SAFE_AT_SOURCE": RobotJobEvent.FAIL_SAFE_AT_SOURCE,
+    "POSITION_UNKNOWN": RobotJobEvent.MARK_POSITION_UNKNOWN,
+    "CANCELLED": RobotJobEvent.CANCEL,
 }
 
 
@@ -30,6 +33,7 @@ class RobotSchedulerNode(Node):
 
         self._queue: deque[dict[str, Any]] = deque()
         self._active_job: dict[str, Any] | None = None
+        self._active_machine = None
         self._emergency_stopped = False
 
         self.create_subscription(
@@ -73,7 +77,7 @@ class RobotSchedulerNode(Node):
             20,
         )
 
-        self.get_logger().info("Robot scheduler ready. Strict FIFO enabled.")
+        self.get_logger().info("Robot scheduler ready. Strict FIFO and job FSM enabled.")
 
     def _job_request_callback(self, msg: String) -> None:
         try:
@@ -104,7 +108,7 @@ class RobotSchedulerNode(Node):
             self._publish_job_status(
                 {
                     **queued_job,
-                    "status": "QUEUED",
+                    "status": RobotJobState.QUEUED.value,
                     "queue_position": len(self._queue),
                 }
             )
@@ -119,6 +123,9 @@ class RobotSchedulerNode(Node):
             return
 
         self._active_job = self._queue.popleft()
+        self._active_machine = make_robot_job_machine(RobotJobState.QUEUED)
+        self._active_machine.handle(RobotJobEvent.DISPATCH)
+
         command = {
             **self._active_job,
             "command": "EXECUTE",
@@ -126,7 +133,7 @@ class RobotSchedulerNode(Node):
         msg = String()
         msg.data = json.dumps(command)
         self.executor_pub.publish(msg)
-        self._publish_job_status({**self._active_job, "status": "DISPATCHED"})
+        self._publish_active_status()
 
     def _executor_status_callback(self, msg: String) -> None:
         try:
@@ -134,7 +141,7 @@ class RobotSchedulerNode(Node):
             if not isinstance(status, dict):
                 raise ValueError("Executor status must be a JSON object")
 
-            if self._active_job is None:
+            if self._active_job is None or self._active_machine is None:
                 self.get_logger().warning("Ignoring executor status with no active job.")
                 return
 
@@ -145,18 +152,26 @@ class RobotSchedulerNode(Node):
                     f"Executor job_id mismatch: active={active_job_id}, reported={reported_job_id}"
                 )
 
-            state = str(status.get("status", "")).strip().upper()
-            if not state:
-                raise ValueError("Executor status is missing status")
+            reported_status = str(status.get("status", "")).strip().upper()
+            event = EXECUTOR_EVENT_BY_STATUS.get(reported_status)
+            if event is None:
+                raise ValueError(f"Unsupported executor status: {reported_status}")
 
-            merged_status = {**self._active_job, **status, "status": state}
-            self._publish_job_status(merged_status)
+            # Repeated RUNNING feedback is an observation, not a second START event.
+            if not (
+                reported_status == "RUNNING"
+                and self._active_machine.state is RobotJobState.RUNNING
+            ):
+                self._active_machine.handle(event)
 
-            if state in TERMINAL_STATUSES:
+            self._publish_active_status(extra=status)
+
+            if self._active_machine.is_terminal:
                 self._active_job = None
+                self._active_machine = None
                 self._dispatch_next_if_idle()
 
-        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        except Exception as exc:
             self.get_logger().warning(f"Executor status rejected: {exc}")
             self._publish_scheduler_alert(str(exc))
 
@@ -168,12 +183,12 @@ class RobotSchedulerNode(Node):
             self._publish_job_status(
                 {
                     **queued_job,
-                    "status": "CANCELLED",
+                    "status": RobotJobState.CANCELLED.value,
                     "reason": "EMERGENCY_STOP",
                 }
             )
 
-        if self._active_job is not None:
+        if self._active_job is not None and self._active_machine is not None:
             cancel = {
                 **self._active_job,
                 "command": "CANCEL",
@@ -183,7 +198,7 @@ class RobotSchedulerNode(Node):
             out.data = json.dumps(cancel)
             self.executor_pub.publish(out)
 
-        self.get_logger().warning("Emergency stop active; robot queue cleared.")
+        self.get_logger().warning("Emergency stop active; queued robot jobs cancelled.")
 
     def _recovery_callback(self, msg: String) -> None:
         if self._active_job is not None:
@@ -195,6 +210,16 @@ class RobotSchedulerNode(Node):
         self._emergency_stopped = False
         self.get_logger().info("Robot scheduler recovered and accepting jobs.")
         self._dispatch_next_if_idle()
+
+    def _publish_active_status(self, *, extra: dict[str, Any] | None = None) -> None:
+        if self._active_job is None or self._active_machine is None:
+            return
+        payload = {
+            **self._active_job,
+            **(extra or {}),
+            "status": self._active_machine.state.value,
+        }
+        self._publish_job_status(payload)
 
     def _publish_job_status(self, payload: dict[str, Any]) -> None:
         msg = String()
