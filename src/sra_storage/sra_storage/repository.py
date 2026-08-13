@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+from sra_core import TransitionNotAllowed
+from sra_production.lifecycle import (
+    ProductLifecycleEvent,
+    make_product_machine,
+)
+
+from .lifecycle import StorageSlotEvent, make_storage_slot_machine
+
 
 class StorageReservationError(RuntimeError):
     """Raised when a physical storage operation cannot be reserved safely."""
@@ -14,29 +22,17 @@ class StorageRepository:
         self.connection = connection
 
     def reserve_slot_for_part(self, part_number: int) -> str:
-        """Reserve the first available slot for one WAITING_PICKUP part.
-
-        The selection and reservation occur in one transaction using row locks,
-        so concurrent storage requests cannot receive the same slot.
-        """
         part_number = int(part_number)
 
         try:
             with self.connection.cursor() as cur:
                 cur.execute(
-                    """
-                    SELECT status
-                    FROM parts
-                    WHERE part_number = %s
-                    FOR UPDATE
-                    """,
+                    "SELECT status FROM parts WHERE part_number = %s FOR UPDATE",
                     (part_number,),
                 )
                 row = cur.fetchone()
                 if row is None:
-                    raise StorageReservationError(
-                        f"Unknown part number: {part_number}"
-                    )
+                    raise StorageReservationError(f"Unknown part number: {part_number}")
 
                 part_status = row[0]
                 if part_status == "STORAGE_RESERVED":
@@ -44,8 +40,7 @@ class StorageRepository:
                         """
                         SELECT slot_id
                         FROM storage_slots
-                        WHERE part_number = %s
-                          AND status = 'RESERVED'
+                        WHERE part_number = %s AND status = 'RESERVED'
                         """,
                         (part_number,),
                     )
@@ -57,14 +52,15 @@ class StorageRepository:
                     self.connection.commit()
                     return existing[0]
 
-                if part_status != "WAITING_PICKUP":
-                    raise StorageReservationError(
-                        f"Part {part_number} is not waiting for storage; status={part_status}"
-                    )
+                part_machine = make_product_machine(part_status)
+                try:
+                    part_machine.handle(ProductLifecycleEvent.RESERVE_STORAGE)
+                except TransitionNotAllowed as exc:
+                    raise StorageReservationError(str(exc)) from exc
 
                 cur.execute(
                     """
-                    SELECT slot_id
+                    SELECT slot_id, status
                     FROM storage_slots
                     WHERE status = 'EMPTY'
                     ORDER BY row_index, column_index
@@ -76,25 +72,28 @@ class StorageRepository:
                 if slot is None:
                     raise StorageReservationError("No empty storage slots available")
 
-                slot_id = slot[0]
+                slot_id, slot_status = slot
+                slot_machine = make_storage_slot_machine(slot_status)
+                try:
+                    slot_machine.handle(StorageSlotEvent.RESERVE)
+                except TransitionNotAllowed as exc:
+                    raise StorageReservationError(str(exc)) from exc
+
                 cur.execute(
                     """
                     UPDATE storage_slots
-                    SET status = 'RESERVED',
-                        part_number = %s,
-                        updated_at = NOW()
+                    SET status = %s, part_number = %s, updated_at = NOW()
                     WHERE slot_id = %s
                     """,
-                    (part_number, slot_id),
+                    (slot_machine.state.value, part_number, slot_id),
                 )
                 cur.execute(
                     """
                     UPDATE parts
-                    SET status = 'STORAGE_RESERVED',
-                        updated_at = NOW()
+                    SET status = %s, updated_at = NOW()
                     WHERE part_number = %s
                     """,
-                    (part_number,),
+                    (part_machine.state.value, part_number),
                 )
 
             self.connection.commit()
@@ -104,7 +103,6 @@ class StorageRepository:
             raise
 
     def complete_storage(self, part_number: int, slot_id: str) -> None:
-        """Mark a successfully placed part and its reserved slot as stored."""
         part_number = int(part_number)
         slot_id = str(slot_id).strip().upper()
 
@@ -122,35 +120,39 @@ class StorageRepository:
                 slot = cur.fetchone()
                 if slot is None:
                     raise StorageReservationError(f"Unknown storage slot: {slot_id}")
-                if slot[0] != "RESERVED" or slot[1] != part_number:
+                if slot[1] != part_number:
                     raise StorageReservationError(
-                        f"Slot {slot_id} is not reserved for part {part_number}"
+                        f"Slot {slot_id} is not assigned to part {part_number}"
                     )
 
                 cur.execute(
-                    """
-                    UPDATE storage_slots
-                    SET status = 'OCCUPIED',
-                        updated_at = NOW()
-                    WHERE slot_id = %s
-                    """,
-                    (slot_id,),
+                    "SELECT status FROM parts WHERE part_number = %s FOR UPDATE",
+                    (part_number,),
+                )
+                part = cur.fetchone()
+                if part is None:
+                    raise StorageReservationError(f"Unknown part number: {part_number}")
+
+                slot_machine = make_storage_slot_machine(slot[0])
+                part_machine = make_product_machine(part[0])
+                try:
+                    slot_machine.handle(StorageSlotEvent.PLACE_CONFIRMED)
+                    part_machine.handle(ProductLifecycleEvent.STORAGE_COMPLETE)
+                except TransitionNotAllowed as exc:
+                    raise StorageReservationError(str(exc)) from exc
+
+                cur.execute(
+                    "UPDATE storage_slots SET status = %s, updated_at = NOW() WHERE slot_id = %s",
+                    (slot_machine.state.value, slot_id),
                 )
                 cur.execute(
                     """
                     UPDATE parts
-                    SET status = 'STORED',
-                        stored_at = NOW(),
-                        updated_at = NOW()
+                    SET status = %s, stored_at = NOW(), updated_at = NOW()
                     WHERE part_number = %s
-                      AND status = 'STORAGE_RESERVED'
                     """,
-                    (part_number,),
+                    (part_machine.state.value, part_number),
                 )
-                if cur.rowcount != 1:
-                    raise StorageReservationError(
-                        f"Part {part_number} is not in STORAGE_RESERVED state"
-                    )
 
             self.connection.commit()
         except Exception:
@@ -158,7 +160,6 @@ class StorageRepository:
             raise
 
     def release_reservation(self, part_number: int, slot_id: str) -> None:
-        """Release a reservation only when the product is known to still be at Dispatch."""
         part_number = int(part_number)
         slot_id = str(slot_id).strip().upper()
 
@@ -176,35 +177,91 @@ class StorageRepository:
                 slot = cur.fetchone()
                 if slot is None:
                     raise StorageReservationError(f"Unknown storage slot: {slot_id}")
-                if slot[0] != "RESERVED" or slot[1] != part_number:
+                if slot[1] != part_number:
                     raise StorageReservationError(
-                        f"Slot {slot_id} is not reserved for part {part_number}"
+                        f"Slot {slot_id} is not assigned to part {part_number}"
                     )
+
+                cur.execute(
+                    "SELECT status FROM parts WHERE part_number = %s FOR UPDATE",
+                    (part_number,),
+                )
+                part = cur.fetchone()
+                if part is None:
+                    raise StorageReservationError(f"Unknown part number: {part_number}")
+
+                slot_machine = make_storage_slot_machine(slot[0])
+                part_machine = make_product_machine(part[0])
+                try:
+                    slot_machine.handle(StorageSlotEvent.RELEASE_RESERVATION)
+                    part_machine.handle(ProductLifecycleEvent.RELEASE_STORAGE)
+                except TransitionNotAllowed as exc:
+                    raise StorageReservationError(str(exc)) from exc
 
                 cur.execute(
                     """
                     UPDATE storage_slots
-                    SET status = 'EMPTY',
-                        part_number = NULL,
-                        updated_at = NOW()
+                    SET status = %s, part_number = NULL, updated_at = NOW()
                     WHERE slot_id = %s
+                    """,
+                    (slot_machine.state.value, slot_id),
+                )
+                cur.execute(
+                    "UPDATE parts SET status = %s, updated_at = NOW() WHERE part_number = %s",
+                    (part_machine.state.value, part_number),
+                )
+
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def mark_position_unknown(self, part_number: int, slot_id: str) -> None:
+        """Persist physical uncertainty after an ambiguous robot failure."""
+        part_number = int(part_number)
+        slot_id = str(slot_id).strip().upper()
+
+        try:
+            with self.connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT status, part_number
+                    FROM storage_slots
+                    WHERE slot_id = %s
+                    FOR UPDATE
                     """,
                     (slot_id,),
                 )
+                slot = cur.fetchone()
+                if slot is None or slot[1] != part_number:
+                    raise StorageReservationError(
+                        f"Slot {slot_id} is not assigned to part {part_number}"
+                    )
+
                 cur.execute(
-                    """
-                    UPDATE parts
-                    SET status = 'WAITING_PICKUP',
-                        updated_at = NOW()
-                    WHERE part_number = %s
-                      AND status = 'STORAGE_RESERVED'
-                    """,
+                    "SELECT status FROM parts WHERE part_number = %s FOR UPDATE",
                     (part_number,),
                 )
-                if cur.rowcount != 1:
-                    raise StorageReservationError(
-                        f"Part {part_number} is not in STORAGE_RESERVED state"
-                    )
+                part = cur.fetchone()
+                if part is None:
+                    raise StorageReservationError(f"Unknown part number: {part_number}")
+
+                slot_machine = make_storage_slot_machine(slot[0])
+                part_machine = make_product_machine(part[0])
+                try:
+                    slot_machine.handle(StorageSlotEvent.MARK_UNKNOWN)
+                    part_machine.handle(ProductLifecycleEvent.MARK_POSITION_UNKNOWN)
+                except TransitionNotAllowed as exc:
+                    raise StorageReservationError(str(exc)) from exc
+
+                cur.execute(
+                    "UPDATE storage_slots SET status = %s, updated_at = NOW() WHERE slot_id = %s",
+                    (slot_machine.state.value, slot_id),
+                )
+                cur.execute(
+                    "UPDATE parts SET status = %s, updated_at = NOW() WHERE part_number = %s",
+                    (part_machine.state.value, part_number),
+                )
 
             self.connection.commit()
         except Exception:
