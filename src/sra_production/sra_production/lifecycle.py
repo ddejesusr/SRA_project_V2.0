@@ -38,6 +38,7 @@ class ProductLifecycleState(str, Enum):
     STORED = "STORED"
     DELIVERY_RESERVED = "DELIVERY_RESERVED"
     DELIVERED = "DELIVERED"
+    POSITION_UNKNOWN = "POSITION_UNKNOWN"
     SCRAPPED = "SCRAPPED"
 
 
@@ -49,6 +50,10 @@ class ProductLifecycleEvent(str, Enum):
     RESERVE_DELIVERY = "RESERVE_DELIVERY"
     DELIVERY_COMPLETE = "DELIVERY_COMPLETE"
     RELEASE_DELIVERY = "RELEASE_DELIVERY"
+    MARK_POSITION_UNKNOWN = "MARK_POSITION_UNKNOWN"
+    RECOVER_WAITING_PICKUP = "RECOVER_WAITING_PICKUP"
+    RECOVER_STORED = "RECOVER_STORED"
+    RECOVER_DELIVERED = "RECOVER_DELIVERED"
     SCRAP = "SCRAP"
 
 
@@ -75,6 +80,11 @@ PRODUCT_DEFINITION = StateMachineDefinition.from_iterable(
             ProductLifecycleState.WAITING_PICKUP,
         ),
         Transition(
+            ProductLifecycleState.STORAGE_RESERVED,
+            ProductLifecycleEvent.MARK_POSITION_UNKNOWN,
+            ProductLifecycleState.POSITION_UNKNOWN,
+        ),
+        Transition(
             ProductLifecycleState.STORED,
             ProductLifecycleEvent.RESERVE_DELIVERY,
             ProductLifecycleState.DELIVERY_RESERVED,
@@ -90,12 +100,37 @@ PRODUCT_DEFINITION = StateMachineDefinition.from_iterable(
             ProductLifecycleState.STORED,
         ),
         Transition(
+            ProductLifecycleState.DELIVERY_RESERVED,
+            ProductLifecycleEvent.MARK_POSITION_UNKNOWN,
+            ProductLifecycleState.POSITION_UNKNOWN,
+        ),
+        Transition(
+            ProductLifecycleState.POSITION_UNKNOWN,
+            ProductLifecycleEvent.RECOVER_WAITING_PICKUP,
+            ProductLifecycleState.WAITING_PICKUP,
+        ),
+        Transition(
+            ProductLifecycleState.POSITION_UNKNOWN,
+            ProductLifecycleEvent.RECOVER_STORED,
+            ProductLifecycleState.STORED,
+        ),
+        Transition(
+            ProductLifecycleState.POSITION_UNKNOWN,
+            ProductLifecycleEvent.RECOVER_DELIVERED,
+            ProductLifecycleState.DELIVERED,
+        ),
+        Transition(
             ProductLifecycleState.IN_PRODUCTION,
             ProductLifecycleEvent.SCRAP,
             ProductLifecycleState.SCRAPPED,
         ),
         Transition(
             ProductLifecycleState.WAITING_PICKUP,
+            ProductLifecycleEvent.SCRAP,
+            ProductLifecycleState.SCRAPPED,
+        ),
+        Transition(
+            ProductLifecycleState.POSITION_UNKNOWN,
             ProductLifecycleEvent.SCRAP,
             ProductLifecycleState.SCRAPPED,
         ),
