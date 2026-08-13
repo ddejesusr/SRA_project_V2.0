@@ -2,6 +2,7 @@
 
 from typing import Any, Callable, Mapping
 
+from sra_delivery.repository import DeliveryReservationError
 from sra_delivery.service import prepare_delivery
 
 from .base import Skill, SkillDefinition
@@ -59,14 +60,32 @@ class RequestDeliverySkill(Skill):
         if missing:
             raise ValueError(f"Missing required delivery arguments: {', '.join(missing)}")
 
-        prepared = prepare_delivery(
-            self._repository,
-            bottom_cover=arguments["bottom_cover"],
-            top_cover=arguments["top_cover"],
-            fuse_configuration=arguments["fuse_configuration"],
-            quantity=arguments["quantity"],
-            destination=arguments["destination"],
-        )
+        try:
+            prepared = prepare_delivery(
+                self._repository,
+                bottom_cover=arguments["bottom_cover"],
+                top_cover=arguments["top_cover"],
+                fuse_configuration=arguments["fuse_configuration"],
+                quantity=arguments["quantity"],
+                destination=arguments["destination"],
+            )
+        except DeliveryReservationError as exc:
+            detail = str(exc)
+            if detail.startswith("Insufficient stored stock:"):
+                values = {}
+                for fragment in detail.split(":", 1)[1].split(","):
+                    key, value = fragment.strip().split("=", 1)
+                    values[key] = int(value)
+                return {
+                    "success": False,
+                    "error": "INSUFFICIENT_STOCK",
+                    "requested": values.get("requested", 0),
+                    "available": values.get("available", 0),
+                    "bottom_cover": str(arguments["bottom_cover"]).lower(),
+                    "top_cover": str(arguments["top_cover"]).lower(),
+                    "fuse_configuration": str(arguments["fuse_configuration"]).lower(),
+                }
+            raise
 
         for job in prepared["jobs"]:
             self._publish_job(job)
