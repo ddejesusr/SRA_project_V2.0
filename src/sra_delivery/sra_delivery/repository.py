@@ -27,6 +27,7 @@ class DeliveryRepository:
         quantity: int,
         destination: str,
     ) -> dict:
+        """Atomically reserve exact stored parts and assign all robot job IDs."""
         quantity = int(quantity)
         if quantity <= 0:
             raise DeliveryReservationError("Delivery quantity must be greater than zero")
@@ -81,11 +82,12 @@ class DeliveryRepository:
                 for part_number, slot_id, part_status, slot_status in rows:
                     part_machine = make_product_machine(part_status)
                     part_machine.handle(ProductLifecycleEvent.RESERVE_DELIVERY)
-                    if slot_status != 'OCCUPIED':
+                    if slot_status != "OCCUPIED":
                         raise DeliveryReservationError(
                             f"Slot {slot_id} is not occupied during delivery reservation"
                         )
 
+                    job_id = str(uuid.uuid4())
                     cur.execute(
                         """
                         UPDATE parts
@@ -97,13 +99,19 @@ class DeliveryRepository:
                     cur.execute(
                         """
                         INSERT INTO delivery_request_items (
-                            request_id, part_number, slot_id, status
+                            request_id, part_number, slot_id, status, robot_job_id
                         )
-                        VALUES (%s, %s, %s, 'RESERVED')
+                        VALUES (%s, %s, %s, 'QUEUED', %s)
                         """,
-                        (request_id, part_number, slot_id),
+                        (request_id, part_number, slot_id, job_id),
                     )
-                    items.append({"part_number": part_number, "slot_id": slot_id})
+                    items.append(
+                        {
+                            "part_number": part_number,
+                            "slot_id": slot_id,
+                            "job_id": job_id,
+                        }
+                    )
 
                 cur.execute(
                     """
@@ -124,38 +132,11 @@ class DeliveryRepository:
             self.connection.rollback()
             raise
 
-    def assign_job(self, request_id: int, part_number: int, job_id: str) -> None:
-        try:
-            job_uuid = uuid.UUID(str(job_id))
-        except (ValueError, TypeError) as exc:
-            raise DeliveryReservationError(f"Invalid robot job id: {job_id}") from exc
-
-        try:
-            with self.connection.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE delivery_request_items
-                    SET robot_job_id = %s, status = 'QUEUED', updated_at = NOW()
-                    WHERE request_id = %s
-                      AND part_number = %s
-                      AND status = 'RESERVED'
-                    """,
-                    (str(job_uuid), int(request_id), int(part_number)),
-                )
-                if cur.rowcount != 1:
-                    raise DeliveryReservationError(
-                        f"Delivery item {request_id}/{part_number} cannot be assigned"
-                    )
-            self.connection.commit()
-        except Exception:
-            self.connection.rollback()
-            raise
-
     def mark_running(self, job_id: str) -> None:
         self._set_item_status(job_id, from_states=("QUEUED",), to_state="RUNNING")
 
     def complete_delivery(self, job_id: str) -> dict:
-        """Confirm retrieval+placement at destination and free the source slot."""
+        """Confirm retrieval and placement at destination, then free source slot."""
         try:
             with self.connection.cursor() as cur:
                 item = self._get_item_for_update(cur, job_id)
@@ -211,7 +192,7 @@ class DeliveryRepository:
             raise
 
     def release_before_pick(self, job_id: str) -> dict:
-        """Release a delivery reservation only when part is confirmed still in storage."""
+        """Release reservation only when the part is confirmed still in storage."""
         try:
             with self.connection.cursor() as cur:
                 item = self._get_item_for_update(cur, job_id)
