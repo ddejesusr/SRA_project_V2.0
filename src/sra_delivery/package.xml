@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>sra_delivery</name>
+  <version>0.1.0</version>
+  <description>SRA V2 deterministic physical delivery orchestration</description>
+  <maintainer email="master@todo.todo">master</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>sra_core</depend>
+  <depend>sra_production</depend>
+  <depend>sra_storage</depend>
+  <exec_depend>python3-psycopg2</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
