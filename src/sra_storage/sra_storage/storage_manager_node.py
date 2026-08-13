@@ -135,6 +135,14 @@ class StorageManagerNode(Node):
                 return
 
             if state in {"FAILED", "POSITION_UNKNOWN"}:
+                self._repository.mark_position_unknown(part_number, slot_id)
+                self._publish_storage_event(
+                    {
+                        "type": "part_position_unknown",
+                        "part_number": part_number,
+                        "slot_id": slot_id,
+                    }
+                )
                 self._publish_storage_alert(
                     f"Store job for part {part_number} ended in {state}",
                     operator_message=(
